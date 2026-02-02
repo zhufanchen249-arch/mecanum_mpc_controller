@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="config_file" default="$(find-pkg-share mecanum_mpc_controller)/param/mecanum_car.yaml" description="Path to config file"/>
+
+  <node pkg="mecanum_mpc_controller" exec="mpc_node" name="mecanum_mpc_node" output="screen">
+    
+    <param from="$(var config_file)"/>
+    <param name="use_sim_time" value="false"/>
+
+    <remap from="input/odometry" to="/localization/kinematic_state"/>
+    
+    <remap from="input/trajectory" to="/planning/scenario_planning/trajectory"/>
+    
+    <remap from="output/mecanum_twist" to="/cmd_vel"/>
+    
+    <remap from="output/predicted_trajectory" to="/mpc/debug/predicted_trajectory"/>
+    
+  </node>
+</launch>
