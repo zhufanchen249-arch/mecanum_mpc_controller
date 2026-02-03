@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(autoware_cmake REQUIRED)
 autoware_package()
+find_package(OsqpEigen REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # 创建库
 set(MECANUM_MPC_LIB ${PROJECT_NAME}_lib)
