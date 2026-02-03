@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.14)
 project(mecanum_mpc_controller)
 
+# 查找依赖库
+find_package(OsqpEigen REQUIRED)
+find_package(yaml-cpp REQUIRED)
+
 # 新增：指定C++标准
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,7 +33,7 @@ target_link_libraries(${MECANUM_MPC_LIB}
 
 # 创建可执行文件
 ament_auto_add_executable(mpc_node
-  src/mcp_code.cpp
+  src/mpc_code.cpp
 )
 
 # 链接库到可执行文件
