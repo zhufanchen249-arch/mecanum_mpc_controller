@@ -15,7 +15,7 @@ sampling_time: 0.05   # 频率20hz
 # 状态向量：[x, y, theta, vx, vy, omega]
 # x/y：位置（米），theta：姿态角（弧度），vx：纵向速度（米/秒）
 # vy：横向速度（米/秒，麦克纳姆轮核心参数），omega：角速度（弧度/秒）
-state_constraints:
+
 state_constraints:
   # 状态向量对应：[x, y, theta, vx, vy, omega]
   x_min: [-10.0, -1.8, -3.14159, -0.3, -0.3, -0.5]  # 下界
