@@ -5,7 +5,8 @@
 # 预测步长：MPC向前预测的步数（N），需满足 N*sampling_time < 轨迹规划周期
 # 建议：麦克纳姆轮灵活性高，可适当减小（8-15步），降低计算量
 prediction_horizon: 20
-
+#，确保 ROS 循环频率也是 20Hz
+control_rate: 20.0
 # 采样时间（秒）：控制周期，需与代码中control_rate保持一致（1/control_rate）
 # 建议：麦克纳姆轮响应快，可设0.05-0.2s（对应5-20Hz），需匹配硬件计算能力
 sampling_time: 0.05   # 频率20hz
@@ -15,7 +16,7 @@ sampling_time: 0.05   # 频率20hz
 # 状态向量：[x, y, theta, vx, vy, omega]
 # x/y：位置（米），theta：姿态角（弧度），vx：纵向速度（米/秒）
 # vy：横向速度（米/秒，麦克纳姆轮核心参数），omega：角速度（弧度/秒）
-state_constraints:
+
 state_constraints:
   # 状态向量对应：[x, y, theta, vx, vy, omega]
   x_min: [-10.0, -1.8, -3.14159, -0.3, -0.3, -0.5]  # 下界
