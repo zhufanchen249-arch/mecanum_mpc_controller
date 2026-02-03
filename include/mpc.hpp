@@ -5,7 +5,9 @@
 #include <OsqpEigen/OsqpEigen.h>
 #include <vector>
 #include <string>
-#include "autoware/mpc_lateral_controller/vehicle_model/vehicle_model_interface.hpp"
+// 【移除】不再引用 Autoware 内部接口，解决编译找不到文件的问题
+// #include "autoware/mpc_lateral_controller/vehicle_model/vehicle_model_interface.hpp"
+
 #include "autoware_auto_control_msgs/msg/ackermann_lateral_command.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "autoware_auto_planning_msgs/msg/trajectory.hpp"
@@ -15,7 +17,8 @@
 
 namespace autoware::mpc_lateral_controller {
 
-class MPCTracker : public VehicleModelInterface {
+// 【修改】移除继承 : public VehicleModelInterface
+class MPCTracker {
 public:
     // 类型别名提高可读性
     using StateVector = Eigen::Matrix<double, 6, 1>;  // 固定6维，6维状态向量 [x, y, theta, vx, vy, omega]
@@ -70,13 +73,13 @@ public:
     Eigen::MatrixXd getQWeight() const { return Q_; }
     Eigen::MatrixXd getRWeight() const { return R_; }
 
-    // 实现VehicleModelInterface纯虚函数
+    // 【修改】移除 override 关键字，因为不再继承基类
     bool calculateMPC(
         const autoware_auto_control_msgs::msg::AckermannLateralCommand & current_steer,
         const nav_msgs::msg::Odometry & current_kinematics,
         autoware_auto_control_msgs::msg::AckermannLateralCommand & output,
         autoware_auto_planning_msgs::msg::Trajectory & predicted_traj,
-        autoware_adapi_v1_msgs::msg::Float32MultiArrayStamped & debug_values) override;
+        autoware_adapi_v1_msgs::msg::Float32MultiArrayStamped & debug_values);
 
 private:
     // MPC核心参数
