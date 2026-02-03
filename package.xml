@@ -3,7 +3,7 @@
 <package format="3">
   <name>mecanum_mpc_controller</name>
   <version>1.0.0</version>
-  <description>MPC controller for mecanum wheel robot</description>
+  <description>MPC controller for mecanum wheel robot using std_msgs</description>
 
   <maintainer email="your_email@example.com">Your Name</maintainer>
   <license>Apache License 2.0</license>
@@ -13,7 +13,6 @@
 
   <depend>autoware_auto_control_msgs</depend>
   <depend>autoware_auto_planning_msgs</depend>
-  <depend>autoware_adapi_v1_msgs</depend>
   <depend>autoware_trajectory_follower_base</depend>
   <depend>eigen</depend>
   <depend>geometry_msgs</depend>

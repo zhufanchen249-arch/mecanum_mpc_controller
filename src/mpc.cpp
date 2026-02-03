@@ -6,47 +6,56 @@
 #include <cmath>
 #include <algorithm> 
 #include <tf2/LinearMath/Quaternion.h>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <autoware_auto_control_msgs/msg/ackermann_lateral_command.hpp>
+#include <autoware_auto_planning_msgs/msg/trajectory.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 
 namespace autoware::mpc_lateral_controller {
 
-// 修改构造函数，移除 VehicleModelInterface() 的调用
+// 类型定义（需确保mpc.hpp中包含对应声明）
+using StateVector = Eigen::VectorXd;
+using ControlVector = Eigen::Vector3d;
+using OutputVector = Eigen::Vector3d;
+
+// 构造函数
 MPCTracker::MPCTracker(const std::string& configFile, double wheelbase)
-    : N_(20), dt_(0.05), // 这里可以顺便把默认值改成你 YAML 里对应的值(20Hz)
-      wheelbase_(wheelbase),
-      wheel_radius_(0.05),
-      track_width_(0.5),
+    : N_(20), dt_(0.05), wheelbase_(wheelbase),
+      wheel_radius_(0.05), track_width_(0.5),
       u_min_(ControlVector::Zero()), u_max_(ControlVector::Zero()),
       x_min_(StateVector::Zero(6)), x_max_(StateVector::Zero(6)),
       current_state_(StateVector::Zero(6)),
       C_tilde_(Eigen::MatrixXd::Identity(3, 6)),
       solver_initialized_(false), last_pred_traj_() {
     
-    // 尝试从配置文件加载参数，如果失败则使用默认值
     if (!loadConfig(configFile)) {
-        std::cerr << "[MPCTracker] 使用默认配置初始化" << std::endl;
+        std::cerr << "[MPCTracker] 使用默认配置" << std::endl;
         initializeWeights();
-        
-        // 默认约束（移除与转向相关的限制）
-        x_min_ << -100.0, -100.0, -M_PI, -1.0, -1.0, -1.0;
-        x_max_ << 100.0, 100.0, M_PI, 1.0, 1.0, 1.0;
-        u_min_ << -0.3, -0.3, -1.0;
-        u_max_ << 0.3, 0.3, 1.0;
+        // 默认约束
+        x_min_ << -10.0, -5.0, -M_PI, -2.0, -2.0, -2.0;
+        x_max_ << 10.0, 5.0, M_PI, 2.0, 2.0, 2.0;
+        u_min_ << -1.0, -1.0, -1.5;
+        u_max_ << 1.0, 1.0, 1.5;
     }
-    
-    // 初始化麦克纳姆轮模型
     initializeMecanumModel();
-
+    
     // 求解器配置
     solver_.settings()->setVerbosity(false);
     solver_.settings()->setWarmStart(true);
     solver_.settings()->setMaximumIterations(1000);
 }
-    
-/**
- * @brief 从YAML文件加载配置参数
- * @param configFile YAML配置文件路径
- * @return 是否加载成功
- */
+
+// 初始化权重矩阵
+void MPCTracker::initializeWeights() {
+    Q_ = Eigen::MatrixXd::Zero(3 * N_, 3 * N_);
+    R_ = Eigen::MatrixXd::Zero(3 * N_, 3 * N_);
+    for (int i = 0; i < N_; ++i) {
+        Q_.block<3, 3>(i * 3, i * 3) = 10.0 * Eigen::MatrixXd::Identity(3, 3);
+        R_.block<3, 3>(i * 3, i * 3) = 0.1 * Eigen::MatrixXd::Identity(3, 3);
+    }
+}
+
+// 加载配置文件
 bool MPCTracker::loadConfig(const std::string& configFile) {
     try {
         YAML::Node config = YAML::LoadFile(configFile);
@@ -141,60 +150,7 @@ bool MPCTracker::loadConfig(const std::string& configFile) {
     }
 }
 
-bool MPCTracker::saveConfig(const std::string& configFile) {
-    try {
-        YAML::Node config;
-        
-        // 保存预测步长和采样时间
-        config["prediction_horizon"] = N_;
-        config["sampling_time"] = dt_;
-        
-        // 保存状态约束
-        std::vector<double> x_min, x_max;
-        for (int i = 0; i < 6; ++i) {
-            x_min.push_back(x_min_(i));
-            x_max.push_back(x_max_(i));
-        }
-        config["state_constraints"]["x_min"] = x_min;
-        config["state_constraints"]["x_max"] = x_max;
-        
-        // 保存控制约束
-        std::vector<double> u_min, u_max;
-        for (int i = 0; i < 3; ++i) {
-            u_min.push_back(u_min_(i));
-            u_max.push_back(u_max_(i));
-        }
-        config["control_constraints"]["u_min"] = u_min;
-        config["control_constraints"]["u_max"] = u_max;
-        
-        // 保存权重参数（取第一个块的权重值）
-        double q = Q_.block<3, 3>(0, 0)(0, 0);
-        double r = R_.block<3, 3>(0, 0)(0, 0);
-        config["weights"]["Q"] = q;
-        config["weights"]["R"] = r;
-        
-        // 新增：保存麦克纳姆轮参数
-        config["mecanum_wheel"]["radius"] = wheel_radius_;
-        config["mecanum_wheel"]["track_width"] = track_width_;
-        
-        // 写入文件
-        std::ofstream fout(configFile);
-        if (fout.is_open()) {
-            fout << config;
-            fout.close();
-            std::cout << "[MPCTracker] 配置已保存到: " << configFile << std::endl;
-            return true;
-        } else {
-            std::cerr << "[MPCTracker] 无法打开文件写入配置: " << configFile << std::endl;
-            return false;
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[MPCTracker] 保存配置文件失败: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-// 新增：初始化麦克纳ム轮运动学矩阵
+// 初始化麦克纳姆轮模型
 void MPCTracker::initializeMecanumModel() {
     double L = wheelbase_ / 2.0;    // 半轮距（前后到中心距离）
     double W = track_width_ / 2.0;  // 半轴距（左右到中心距离）
@@ -213,127 +169,16 @@ void MPCTracker::initializeMecanumModel() {
     M_inv_ = M_.completeOrthogonalDecomposition().pseudoInverse();
     
     std::cout << "[MPCTracker] 麦克纳姆轮模型初始化完成" << std::endl;
-    std::cout << "逆向运动学矩阵 M:\n" << M_ << std::endl;
-    std::cout << "正向运动学矩阵 M_inv:\n" << M_inv_ << std::endl;
 }
 
-// 新增：将MPC输出的[vx, vy, ω]转换为四轮转速
+// 计算麦克纳姆轮转速
 std::vector<double> MPCTracker::computeWheelSpeeds(const ControlVector& u) {
     Eigen::Vector3d twist(u(0), u(1), u(2));  // u为[vx, vy, ω]
     Eigen::Vector4d wheel_speeds = M_ * twist;
     return {wheel_speeds(0), wheel_speeds(1), wheel_speeds(2), wheel_speeds(3)};
 }
 
-// 新增：从四轮转速计算机器人运动速度（可选，用于反馈）
-Eigen::Vector3d MPCTracker::computeTwist(const std::vector<double>& wheel_speeds) {
-    if (wheel_speeds.size() != 4) {
-        std::cerr << "[MPCTracker] 轮子速度必须为4个元素" << std::endl;
-        return Eigen::Vector3d::Zero();
-    }
-    Eigen::Vector4d ws(wheel_speeds[0], wheel_speeds[1], wheel_speeds[2], wheel_speeds[3]);
-    return M_inv_ * ws;
-}
-
-void MPCTracker::initializeWeights() {
-    Q_ = Eigen::MatrixXd::Zero(3 * N_, 3 * N_);
-    R_ = Eigen::MatrixXd::Zero(3 * N_, 3 * N_);
-    for (int i = 0; i < N_; ++i) {
-        Q_.block<3, 3>(i * 3, i * 3) = 10.0 * Eigen::MatrixXd::Identity(3, 3);
-        R_.block<3, 3>(i * 3, i * 3) = 0.1 * Eigen::MatrixXd::Identity(3, 3);
-    }
-}
-
-void MPCTracker::setPredictionHorizon(int N) {
-    if (N > 0 && N != N_) {
-        N_ = N;
-        initializeWeights();
-        solver_initialized_ = false;
-    }
-}
-
-void MPCTracker::setSamplingTime(double dt) {
-    if (dt > 0 && dt != dt_) {
-        dt_ = dt;
-        solver_initialized_ = false;
-    }
-}
-
-void MPCTracker::setStateBounds(const StateVector& x_min, const StateVector& x_max) {
-    if (x_min.size() != 6 || x_max.size() != 6) {
-        std::cerr << "[MPCTracker] 状态约束必须为6维向量" << std::endl;
-        return;
-    }
-    
-    x_min_ = x_min;
-    x_max_ = x_max;
-    solver_initialized_ = false;
-}
-
-void MPCTracker::setControlBounds(const ControlVector& u_min, const ControlVector& u_max) {
-    u_min_ = u_min;
-    u_max_ = u_max;
-    solver_initialized_ = false; 
-}
-
-void MPCTracker::setWeights(const Eigen::MatrixXd& Q, const Eigen::MatrixXd& R) {
-    if (Q.rows() != 3 * N_ || Q.cols() != 3 * N_) {
-        std::cerr << "[MPCTracker] Q维度不匹配！需为 " << 3 * N_ << "x" << 3 * N_ << std::endl;
-        return;
-    }
-    if (R.rows() != 3 * N_ || R.cols() != 3 * N_) {
-        std::cerr << "[MPCTracker] R维度不匹配！需为 " << 3 * N_ << "x" << 3 * N_ << std::endl;
-        return;
-    }
-    Q_ = Q;
-    R_ = R;
-    solver_initialized_ = false;
-}
-
-void MPCTracker::setReferenceTrajectory(const std::vector<StateVector>& ref_traj) {
-    for (const auto& point : ref_traj) {
-        if (point.size() != 6) {
-            std::cerr << "[MPCTracker] 参考轨迹点必须为6维向量" << std::endl;
-            return false;
-        }
-    }
-    
-    if (ref_traj.size() != N_) {
-        std::cerr << "[MPCTracker] 参考轨迹长度与预测步长不匹配！" << std::endl;
-        return false;  
-    }
-    ref_traj_ = ref_traj;
-    return true;
-}
-
-void MPCTracker::setReferenceControl(const std::vector<ControlVector>& ref_control) {
-    if (ref_control.size() != N_) {
-        std::cerr << "[MPCTracker] 参考控制长度与预测步长不匹配！"  << std::endl;
-        return false;  
-    }
-    ref_control_ = ref_control;
-    return true; 
-}
-
-void MPCTracker::setCurrentState(const StateVector& state) {
-    if (state.size() != 6) {
-        std::cerr << "[MPCTracker] 状态向量必须为6维" << std::endl;
-        return;
-    }
-    current_state_ = state;
-}
-
-void MPCTracker::setOutputMatrix(const Eigen::MatrixXd& C_tilde) {
-    if (C_tilde.rows() != 3 || C_tilde.cols() != 6) {
-        std::cerr << "[MPCTracker] C_tilde维度不匹配！需为 3x6" << std::endl;
-        return;
-    }
-    C_tilde_ = C_tilde;
-}
-
-std::vector<MPCTracker::OutputVector> MPCTracker::getPredictedTrajectory() const {
-    return last_pred_traj_;
-}
-
+// 控制输入饱和处理
 MPCTracker::ControlVector MPCTracker::saturateControl(const ControlVector& u) const {
     ControlVector out;
     out(0) = std::clamp(u(0), u_min_(0), u_max_(0));
@@ -342,37 +187,29 @@ MPCTracker::ControlVector MPCTracker::saturateControl(const ControlVector& u) co
     return out;
 }
 
+// 构建增广状态空间矩阵A和B
 void MPCTracker::buildAugmentedAB(const ControlVector& ref_u, double theta,
                                   Eigen::MatrixXd& A_aug, Eigen::MatrixXd& B_aug) {
     const double T = dt_;
     const double c = std::cos(theta);
     const double s = std::sin(theta);
-    // 修正 A 矩阵 (状态转移)
+    
+    // 状态转移矩阵A
     A_aug = Eigen::MatrixXd::Identity(6, 6);
-    // 位置更新依赖于上一时刻的速度状态投影
-    // 但通常 MPC 的 delta_u 形式，B 矩阵才是关键
     
-    // 修正 B 矩阵 (控制矩阵) 
-    // 这是核心！输入 u 是车身速度，对位置 x, y 的影响需要旋转
+    // 控制矩阵B
     B_aug = Eigen::MatrixXd::Zero(6, 3);
-    
-    // delta_vx 对 x, y 的影响
-    B_aug(0, 0) = c * T;  
-    B_aug(1, 0) = s * T;
-    
-    // delta_vy 对 x, y 的影响 (麦克纳姆轮的灵魂!)
-    B_aug(0, 1) = -s * T; 
-    B_aug(1, 1) = c * T;
-    
-    // delta_omega 对 theta 的影响
-    B_aug(2, 2) = T;
-
-    // 速度状态本身的更新 (假设是积分模型)
-    B_aug(3, 0) = 1; // vx += delta_vx
-    B_aug(4, 1) = 1; // vy += delta_vy
-    B_aug(5, 2) = 1; // w  += delta_w
+    B_aug(0, 0) = c * T;  // delta_vx 对x的影响
+    B_aug(1, 0) = s * T;  // delta_vx 对y的影响
+    B_aug(0, 1) = -s * T; // delta_vy 对x的影响
+    B_aug(1, 1) = c * T;  // delta_vy 对y的影响
+    B_aug(2, 2) = T;      // delta_omega 对theta的影响
+    B_aug(3, 0) = 1;      // vx += delta_vx
+    B_aug(4, 1) = 1;      // vy += delta_vy
+    B_aug(5, 2) = 1;      // w += delta_w
 }
 
+// 构建Phi矩阵
 Eigen::MatrixXd MPCTracker::buildPhiAug() {
     const int n = 6;
     const int p = 3;
@@ -396,6 +233,7 @@ Eigen::MatrixXd MPCTracker::buildPhiAug() {
     return Phi;
 }
 
+// 构建Theta矩阵
 Eigen::MatrixXd MPCTracker::buildThetaAug() {
     const int n = 6;
     const int m = 3;
@@ -428,6 +266,7 @@ Eigen::MatrixXd MPCTracker::buildThetaAug() {
     return Theta;
 }
 
+// 求解QP问题
 bool MPCTracker::solveQP(ControlVector& optimal_control) {
     if (ref_traj_.empty() || ref_control_.empty()) {
         std::cerr << "[MPCTracker] 参考轨迹或控制输入为空！" << std::endl;
@@ -466,11 +305,12 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
         return false;
     }
 
+    // 构建QP问题的Hessian矩阵和梯度
     Eigen::MatrixXd H = Theta.transpose() * Q_ * Theta + R_;
-    H += Eigen::MatrixXd::Identity(H.rows(), H.cols()) * 1e-6;
+    H += Eigen::MatrixXd::Identity(H.rows(), H.cols()) * 1e-6; // 增加微小值保证正定
     Eigen::VectorXd g = Theta.transpose() * Q_ * (Phi * xi0 - Y_ref);
 
-   // 在solveQP函数中调整控制约束处理调整控制输入约束
+    // 设置变量边界（控制输入约束）
     Eigen::VectorXd var_lower(var_count);
     Eigen::VectorXd var_upper(var_count);
     for (int i = 0; i < N_; ++i) {
@@ -478,6 +318,7 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
         var_upper.segment<control_dim>(i * control_dim) = u_max_;
     }
 
+    // 构建状态约束
     const int state_constraint_count = 2 * output_dim * N_;
     std::vector<Eigen::Triplet<double>> triplets;
     triplets.reserve(state_constraint_count * control_dim);
@@ -490,6 +331,7 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
         last_pred_traj_.push_back(Phi_x0.segment<3>(i * 3) + x_ref0.head<3>());
     }
 
+    // 填充约束矩阵和边界
     for (int i = 0; i < N_; ++i) {
         const int row_start = i * 2 * output_dim;
         const Eigen::MatrixXd Theta_i = Theta.block(i * output_dim, 0, output_dim, var_count);
@@ -519,6 +361,7 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
     Eigen::SparseMatrix<double> A_ineq(state_constraint_count, var_count);
     A_ineq.setFromTriplets(triplets.begin(), triplets.end());
 
+    // 初始化或更新求解器
     if (!solver_initialized_) {
         if (!solver_.data()->setNumberOfVariables(var_count)) return false;
         if (!solver_.data()->setNumberOfConstraints(state_constraint_count)) return false;
@@ -532,6 +375,7 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
         if (!solver_.initSolver()) return false;
         solver_initialized_ = true;
     } else {
+        // 更新求解器参数
         if (!solver_.updateHessianMatrix(H.sparseView())) {
             std::cerr << "[MPCTracker] 更新Hessian矩阵失败！" << std::endl;
             return false;
@@ -554,12 +398,14 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
         }
     }
 
+    // 求解QP问题
     if (!solver_.solveProblem()) {
         std::cerr << "[MPCTracker] OSQP求解失败！可能存在约束冲突。" << std::endl;
         optimal_control = ControlVector::Zero();
         return false;
     }
 
+    // 获取最优解并计算最终控制输入
     Eigen::VectorXd solution = solver_.getSolution();
     ControlVector delta_u = solution.head<control_dim>();
     optimal_control = ref_control_[0] + delta_u;
@@ -568,12 +414,12 @@ bool MPCTracker::solveQP(ControlVector& optimal_control) {
     return true;
 }
 
+// 求解MPC主函数
 bool MPCTracker::solve(ControlVector& optimal_control) {
     bool success = solveQP(optimal_control);
     if (success) {
-        // 转换为四轮转速（此处可根据需求下发到底层控制器）
+        // 计算麦克纳姆轮转速（可根据实际需求下发）
         std::vector<double> wheel_speeds = computeWheelSpeeds(optimal_control);
-        // 示例：打印轮速（实际应用中需替换为控制指令下发）
         std::cout << "轮速指令: " 
                   << wheel_speeds[0] << ", " 
                   << wheel_speeds[1] << ", " 
@@ -583,12 +429,7 @@ bool MPCTracker::solve(ControlVector& optimal_control) {
     return success;
 }
 
-/**
- * @brief 将Autoware轨迹格式转换为内部轨迹格式
- * @param autoware_traj Autoware轨迹
- * @param internal_traj 内部轨迹
- * @return 是否转换成功
- */
+// 转换Autoware轨迹到内部格式
 bool MPCTracker::convertAutowareTrajectoryToInternal(
     const autoware_auto_planning_msgs::msg::Trajectory& autoware_traj,
     std::vector<StateVector>& internal_traj)
@@ -597,7 +438,7 @@ bool MPCTracker::convertAutowareTrajectoryToInternal(
     internal_traj.reserve(autoware_traj.points.size());
 
     for (const auto& point : autoware_traj.points) {
-        StateVector state = StateVector::Zero();
+        StateVector state = StateVector::Zero(6);
         
         // 位置信息
         state[0] = point.pose.position.x;  // X坐标
@@ -610,62 +451,78 @@ bool MPCTracker::convertAutowareTrajectoryToInternal(
         // 速度信息
         state[3] = point.longitudinal_velocity_mps * cos(yaw);  // X方向速度
         state[4] = point.longitudinal_velocity_mps * sin(yaw);  // Y方向速度
-        state[5] = 0.0;  // 角速度，暂时设为0，后续可以根据相邻点估算
+        state[5] = 0.0;  // 角速度，暂时设为0
         
         internal_traj.push_back(state);
     }
     
-    // 如果轨迹点数量大于1，估算角速度
+    // 估算角速度
     if (internal_traj.size() > 1) {
         for (size_t i = 1; i < internal_traj.size() - 1; ++i) {
-            // 使用相邻点的偏航角差值估算角速度
             double dyaw = internal_traj[i+1][2] - internal_traj[i-1][2];
-            internal_traj[i][5] = dyaw / (2 * dt_);  // 角速度
+            internal_traj[i][5] = dyaw / (2 * dt_);
         }
-        
-        // 处理首尾点
-        if (internal_traj.size() > 0) {
+        if (!internal_traj.empty()) {
             if (internal_traj.size() > 1) {
-                internal_traj[0][5] = internal_traj[1][5];  // 第一点使用第二点的值
+                internal_traj[0][5] = internal_traj[1][5];
             }
-            internal_traj.back()[5] = internal_traj[internal_traj.size()-2][5];  // 最后点使用倒数第二点的值
+            internal_traj.back()[5] = internal_traj[internal_traj.size()-2][5];
         }
     }
 
     return !internal_traj.empty();
 }
 
-/**
- * @brief 轨迹跟踪MPC主计算函数
- * @param current_steer 当前转向指令
- * @param current_kinematics 当前运动学状态
- * @param output 输出的转向指令
- * @param predicted_traj 预测轨迹
- * @param debug_values 调试数据
- * @return 是否计算成功
- */
+// 设置参考轨迹
+bool MPCTracker::setReferenceTrajectory(const std::vector<StateVector>& ref_traj) {
+    for (const auto& point : ref_traj) {
+        if (point.size() != 6) {
+            std::cerr << "[MPCTracker] 参考轨迹点必须为6维向量" << std::endl;
+            return false;
+        }
+    }
+    
+    if (ref_traj.size() != N_) {
+        std::cerr << "[MPCTracker] 参考轨迹长度与预测步长不匹配！" << std::endl;
+        return false;  
+    }
+    ref_traj_ = ref_traj;
+    return true;
+}
+
+// 设置参考控制
+bool MPCTracker::setReferenceControl(const std::vector<ControlVector>& ref_control) {
+    if (ref_control.size() != N_) {
+        std::cerr << "[MPCTracker] 参考控制长度与预测步长不匹配！"  << std::endl;
+        return false;  
+    }
+    ref_control_ = ref_control;
+    return true; 
+}
+
+// 核心MPC计算函数（修改debug_values参数类型）
 bool MPCTracker::calculateMPC(
     const autoware_auto_control_msgs::msg::AckermannLateralCommand & current_steer,
     const nav_msgs::msg::Odometry & current_kinematics,
     autoware_auto_control_msgs::msg::AckermannLateralCommand & output,
     autoware_auto_planning_msgs::msg::Trajectory & predicted_traj,
-    autoware_adapi_v1_msgs::msg::Float32MultiArrayStamped & debug_values)
+    std_msgs::msg::Float32MultiArray & debug_values)
 {
-    // 更新当前状态：从里程计数据提取位置、姿态和速度信息
-    current_state_[0] = current_kinematics.pose.pose.position.x;  // X坐标
-    current_state_[1] = current_kinematics.pose.pose.position.y;  // Y坐标
-    current_state_[2] = tf2::getYaw(current_kinematics.pose.pose.orientation);  // 偏航角
-    current_state_[3] = current_kinematics.twist.twist.linear.x;  // X方向线速度
-    current_state_[4] = current_kinematics.twist.twist.linear.y;  // Y方向线速度
-    current_state_[5] = current_kinematics.twist.twist.angular.z; // 角速度
-    
-    // 验证参考轨迹是否存在
+    // 1. 更新当前状态
+    current_state_[0] = current_kinematics.pose.pose.position.x;
+    current_state_[1] = current_kinematics.pose.pose.position.y;
+    current_state_[2] = tf2::getYaw(current_kinematics.pose.pose.orientation);
+    current_state_[3] = current_kinematics.twist.twist.linear.x;
+    current_state_[4] = current_kinematics.twist.twist.linear.y;
+    current_state_[5] = current_kinematics.twist.twist.angular.z;
+
+    // 检查参考轨迹是否为空
     if (ref_traj_.empty()) {
         std::cerr << "[MPCTracker] 参考轨迹为空！" << std::endl;
         return false;
     }
 
-    // 选择最接近当前位姿的轨迹段作为起始点
+    // 2. 寻找最近的参考轨迹点
     int closest_idx = 0;
     double min_dist = std::numeric_limits<double>::max();
     
@@ -681,13 +538,13 @@ bool MPCTracker::calculateMPC(
         }
     }
     
-    // 检查距离阈值，避免跟踪太远的轨迹点
-    if (min_dist > 2.0) {  // 2米阈值，可根据实际需求调整
+    // 距离过远则返回失败
+    if (min_dist > 2.0) {
         std::cerr << "[MPCTracker] 距离参考轨迹太远: " << min_dist << " m" << std::endl;
         return false;
     }
 
-    // 截取从最近点开始的预测范围内的轨迹
+    // 3. 截取局部参考轨迹
     std::vector<StateVector> local_ref_traj;
     int max_idx = std::min(closest_idx + N_, static_cast<int>(ref_traj_.size()));
     
@@ -695,21 +552,15 @@ bool MPCTracker::calculateMPC(
         local_ref_traj.push_back(ref_traj_[i]);
     }
     
-    // 如果截取的轨迹长度不够，用最后一个点填充
+    // 填充不足的轨迹点
     while (local_ref_traj.size() < static_cast<size_t>(N_)) {
         local_ref_traj.push_back(ref_traj_.back());
     }
     
-    // 设置局部参考轨迹
+    // 更新局部参考轨迹
     setReferenceTrajectory(local_ref_traj);
 
-    // 计算初始控制输入作为线性化点
-    ControlVector initial_control = ControlVector::Zero();
-    if (!ref_control_.empty() && closest_idx < static_cast<int>(ref_control_.size())) {
-        initial_control = ref_control_[closest_idx];
-    }
-
-    // 求解MPC优化问题
+    // 4. 求解MPC
     ControlVector optimal_control;
     bool success = solve(optimal_control);
     
@@ -718,67 +569,45 @@ bool MPCTracker::calculateMPC(
         return false;
     }
 
-    // 应用最优控制输入
-    // 对当前状态施加计算出的控制增量
-    current_state_[3] += optimal_control[0] * dt_;  // 更新X方向速度
-    current_state_[4] += optimal_control[1] * dt_;  // 更新Y方向速度
-    current_state_[5] += optimal_control[2] * dt_;  // 更新角速度
+    // 5. 更新状态（预测下一时刻状态）
+    current_state_[3] += optimal_control[0] * dt_;
+    current_state_[4] += optimal_control[1] * dt_;
+    current_state_[5] += optimal_control[2] * dt_;
 
-    // 生成预测轨迹用于可视化和调试
-    std::vector<OutputVector> predicted_states;
-    StateVector temp_state = current_state_;
-    
-    for (int i = 0; i < N_; ++i) {
-        // 使用简单的运动学模型预测下一个状态
-        double theta = temp_state[2];
-        temp_state[0] += (temp_state[3] * cos(theta) - temp_state[4] * sin(theta)) * dt_;  // X更新
-        temp_state[1] += (temp_state[3] * sin(theta) + temp_state[4] * cos(theta)) * dt_;  // Y更新
-        temp_state[2] += temp_state[5] * dt_;  // 偏航角更新
-        
-        // 存储预测的输出状态 [x, y, theta]
-        OutputVector output_state;
-        output_state << temp_state[0], temp_state[1], temp_state[2];
-        predicted_states.push_back(output_state);
-    }
-    
-    // 保存最后一次预测轨迹
-    last_pred_traj_ = predicted_states;
+    // 6. 填充输出控制指令
+    output.lateral.steering_tire_angle = 0.0;  // 麦克纳姆轮无转向角
+    output.longitudinal.velocity = sqrt(pow(current_state_[3], 2) + pow(current_state_[4], 2));
 
-    // 填充输出数据
-    output.lateral.steering_tire_angle = 0.0;  // 麦克纳姆轮不需要传统转向角
-    output.longitudinal.velocity = sqrt(pow(current_state_[3], 2) + pow(current_state_[4], 2));  // 总速度
-
-    // 填充预测轨迹消息
+    // 7. 填充预测轨迹（用于可视化）
     predicted_traj.points.clear();
-    predicted_traj.points.reserve(predicted_states.size());
+    predicted_traj.points.reserve(last_pred_traj_.size());
     
-    for (const auto& state : predicted_states) {
+    for (const auto& state : last_pred_traj_) {
         autoware_auto_planning_msgs::msg::TrajectoryPoint point;
         point.pose.position.x = state[0];
         point.pose.position.y = state[1];
         point.pose.position.z = 0.0;
         
+        // 设置偏航角
         tf2::Quaternion quat;
-        quat.setRPY(0.0, 0.0, state[2]);  // 使用偏航角设置四元数
+        quat.setRPY(0.0, 0.0, state[2]);
         point.pose.orientation.x = quat.x();
         point.pose.orientation.y = quat.y();
         point.pose.orientation.z = quat.z();
         point.pose.orientation.w = quat.w();
         
-        // 设置零速度（因为这是轨迹点而不是控制命令）
         point.longitudinal_velocity_mps = 0.0;
         predicted_traj.points.push_back(point);
     }
 
-    // 填充调试数据 - 包含关键控制信息
+    // 8. 填充调试数据（适配Float32MultiArray）
     debug_values.data.clear();
-    debug_values.data.reserve(6);
-    debug_values.data.push_back(current_state_[3]);  // 当前X方向速度
-    debug_values.data.push_back(current_state_[4]);  // 当前Y方向速度
-    debug_values.data.push_back(current_state_[5]);  // 当前角速度
-    debug_values.data.push_back(optimal_control[0]); // X方向速度增量
-    debug_values.data.push_back(optimal_control[1]); // Y方向速度增量
-    debug_values.data.push_back(optimal_control[2]); // 角速度增量
+    debug_values.data.push_back(current_state_[3]);  // 当前vx
+    debug_values.data.push_back(current_state_[4]);  // 当前vy
+    debug_values.data.push_back(current_state_[5]);  // 当前omega
+    debug_values.data.push_back(optimal_control[0]); // 指令dvx
+    debug_values.data.push_back(optimal_control[1]); // 指令dvy
+    debug_values.data.push_back(optimal_control[2]); // 指令domega
 
     return true;
 }
