@@ -84,6 +84,16 @@ ros2 launch mecanum_mpc_controller mpc_launch.xml
 
 * Eigen3
 * [osqp-eigen](https://github.com/robotology/osqp-eigen)
+  # 下载源码
+git clone [https://github.com/robotology/osqp-eigen.git](https://github.com/robotology/osqp-eigen.git)
+
+# 编译并安装
+cd osqp-eigen
+mkdir build && cd build
+cmake ..
+make
+sudo make install
+
 * yaml-cpp
 * Autoware Universe 相关消息包
 
