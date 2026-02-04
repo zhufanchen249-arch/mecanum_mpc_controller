@@ -12,8 +12,8 @@
   <buildtool_depend>autoware_cmake</buildtool_depend>
 
   <!-- 仅保留核心消息依赖：std_msgs + autoware_auto_control/planning_msgs -->
-  <depend>autoware_auto_control_msgs</depend>
-  <depend>autoware_auto_planning_msgs</depend>
+  <depend>autoware_control_msgs</depend>
+  <depend>autoware_planning_msgs</depend>
   <depend>std_msgs</depend>
   <!-- 以下为代码实际用到的必要基础依赖，不可删除 -->
   <depend>eigen</depend>
@@ -24,6 +24,8 @@
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>yaml-cpp</depend>
+  <depend>ament_index_cpp</depend>
+  <exec_depend>ros2topic</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>autoware_lint_common</test_depend>
